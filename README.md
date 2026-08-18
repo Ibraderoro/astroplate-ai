@@ -224,6 +224,24 @@ Accepts a multipart form upload of an astronomical frame and streams real-time S
 
 ---
 
+## 🛰️ Technical Approximations & Known Limitations
+
+To maintain sub-second response times across cloud environments without requiring mandatory client GPS permissions, the current pipeline employs standard architectural simplifications:
+
+1. **Geocentric Orbital Coordinates:** Satellite RA/Dec ephemerides are computed directly from Earth-Centered TEME vectors (`teme_to_radec()`). Because topocentric parallax adjustments (observer latitude, longitude, and elevation) are omitted in this baseline, apparent positions for Low Earth Orbit (LEO, 400–550 km) objects serve as an astrometric proximity approximation rather than precise topocentric sightlines.
+2. **Illumination & Twilight Constraints:** The orbital model checks spatial intersection across the celestial field of view without computing instantaneous solar phase angles, Earth shadow penumbra entry, or local solar depression angle (twilight visibility).
+3. **Graceful Pipeline Degradation:** In offline environments or upon external API rate limits/timeouts, the engine automatically flags data provenance with a `"source": "fallback"` tag and surfaces a clear UI banner detailing the simulated fallback match.
+
+---
+
+## 📜 Acknowledgements & Data Attribution
+
+* **Astronomical Imagery:** Preset optical star fields for the Orion Nebula (M42), Andromeda Galaxy (M31), and Pleiades (M45) are sourced from NASA SkyView and the **Digitized Sky Survey (DSS)**, produced at the Space Telescope Science Institute (STScI) under U.S. Government grant NAG W-2166.
+* **Plate-Solving Service:** Astrometric indexing and quad-tree catalog reductions powered by the [Astrometry.net](https://nova.astrometry.net/) API.
+* **Orbital Ephemerides:** Two-Line Element (TLE) satellite catalog feeds provided by [CelesTrak](https://celestrak.org/).
+
+---
+
 ## 📄 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
