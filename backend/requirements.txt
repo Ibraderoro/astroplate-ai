@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+requests
+ibm-watsonx-ai
+pydantic
+python-dotenv
+sgp4
