@@ -1,6 +1,12 @@
 'use client';
 
-import { FileJson, ImageDown } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FileJson,
+  ImageDown,
+  Info,
+} from 'lucide-react';
 import { useRef, useState } from 'react';
 import AnalysisProgress from '@/components/AnalysisProgress';
 import ExplanationCard from '@/components/ExplanationCard';
@@ -29,7 +35,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `astroplate_analysis_${Date.now()}.json`;
+    a.download = `astroplate_analysis_${result.source}_${Date.now()}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -38,17 +44,38 @@ export default function Home() {
 
   return (
     <div className='flex flex-col gap-8'>
-      <div>
-        <h2 className='text-2xl font-bold tracking-tight text-white'>
-          Sky Analyser
-        </h2>
-        <p className='mt-1 text-sm text-gray-400'>
-          Upload an astronomical image or choose a preset — AstroPlate AI will
-          plate-solve, detect satellite streaks, and explain what's in the
-          field.
-        </p>
+      {/* Header */}
+      <div className='flex flex-col gap-3 md:flex-row md:items-center md:justify-between'>
+        <div>
+          <h2 className='text-2xl font-bold tracking-tight text-white'>
+            Sky Analyser
+          </h2>
+          <p className='mt-1 text-sm text-gray-400'>
+            Upload an astronomical image or choose a preset — AstroPlate AI will
+            plate-solve, detect satellite streaks, and explain what's in the
+            field.
+          </p>
+        </div>
+
+        {/* Data Provenance Badge */}
+        {result && !loading && (
+          <div className='shrink-0'>
+            {result.source === 'live' ? (
+              <span className='inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-950/60 px-3 py-1 text-xs font-medium text-emerald-400'>
+                <CheckCircle2 className='h-3.5 w-3.5' />
+                Live Solution
+              </span>
+            ) : (
+              <span className='inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-950/60 px-3 py-1 text-xs font-medium text-amber-300'>
+                <AlertTriangle className='h-3.5 w-3.5' />
+                Demo Simulated Mode
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
+      {/* Top row: Dropzone and Progress Stepper */}
       <section className='grid grid-cols-1 gap-6 lg:grid-cols-12'>
         <div className='lg:col-span-5 max-w-md w-full'>
           <ImageDropzone
@@ -65,6 +92,26 @@ export default function Home() {
         )}
       </section>
 
+      {/* Fallback / Graceful Degradation Notice */}
+      {result && result.source === 'fallback' && !loading && (
+        <div className='flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-950/20 p-4 text-amber-200'>
+          <Info className='h-5 w-5 shrink-0 text-amber-400 mt-0.5' />
+          <div className='text-xs space-y-1'>
+            <p className='font-semibold text-amber-300'>
+              Graceful Degradation Notice
+            </p>
+            <p className='text-amber-200/80'>
+              {result.fallback_reason
+                ? `Live astrometric pipeline degraded: ${result.fallback_reason}.`
+                : 'Live solving was unavailable for this frame.'}{' '}
+              Displaying simulated catalog match and synthetic Granite reasoning
+              for interactive demonstration.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Results View */}
       {result && !loading && (
         <div className='grid grid-cols-1 gap-6 lg:grid-cols-3'>
           <div className='lg:col-span-2 flex flex-col gap-3'>

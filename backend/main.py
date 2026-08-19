@@ -35,7 +35,6 @@ def _format_sse(event: str, data: dict) -> str:
 
 
 def _get_preset_fallback(filename: str) -> dict:
-    """Return distinct catalog data if Astrometry.net times out or fails."""
     fn = filename.lower()
     if "andromeda" in fn:
         return {
@@ -64,7 +63,6 @@ def _get_preset_fallback(filename: str) -> dict:
                 {"x": 550.0, "y": 450.0, "width": 30.0, "height": 30.0, "ra": 56.92, "dec": 24.25},
             ],
         }
-    # Default / Orion
     return {
         "width": 800,
         "height": 800,
@@ -83,16 +81,21 @@ async def pipeline_streamer(
     image_bytes: bytes, filename: str, capture_time_utc: datetime
 ) -> AsyncGenerator[str, None]:
     loop = asyncio.get_event_loop()
+    is_fallback = False
+    fallback_reasons = []
 
-    # Step 1: Upload & Read
+    # Step 1: Upload
     yield _format_sse("progress", {"step": "upload", "message": "Frame received and prepared."})
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.05)
 
     # Step 2: Astrometry.net Plate Solving
-    yield _format_sse("progress", {"step": "astrometry", "message": "Solving coordinates..."})
+    yield _format_sse("progress", {"step": "astrometry", "message": "Submitting to Astrometry.net..."})
     try:
         plate_data = await loop.run_in_executor(None, plate_solver.solve, image_bytes)
     except Exception as e:
+        is_fallback = True
+        reason = f"Plate-solve unavailable ({str(e)[:60]})"
+        fallback_reasons.append(reason)
         print(f"[PlateSolver Fallback for {filename}] {e}")
         plate_data = _get_preset_fallback(filename)
 
@@ -103,10 +106,11 @@ async def pipeline_streamer(
             None, satellite_tracker.find_satellites, plate_data, capture_time_utc
         )
     except Exception as e:
+        is_fallback = True
+        fallback_reasons.append("SGP4 satellite propagation offline")
         print(f"[SatelliteTracker Fallback] {e}")
-        # Vary fallback satellite based on target RA
         ra = plate_data.get("center_ra", 0.0)
-        if 50.0 <= ra <= 60.0:  # Pleiades
+        if 50.0 <= ra <= 60.0:
             raw_satellites = [
                 {
                     "name": "STARLINK-3142",
@@ -116,9 +120,9 @@ async def pipeline_streamer(
                     "altitude_km": 550.2,
                 }
             ]
-        elif 8.0 <= ra <= 15.0:  # Andromeda
+        elif 8.0 <= ra <= 15.0:
             raw_satellites = []
-        else:  # Orion
+        else:
             raw_satellites = [
                 {
                     "name": "ISS (ZARYA)",
@@ -136,10 +140,12 @@ async def pipeline_streamer(
             None, granite_explainer.explain, plate_data, raw_satellites
         )
     except Exception as e:
+        is_fallback = True
+        fallback_reasons.append("watsonx.ai inference offline")
         print(f"[GraniteExplainer Fallback] {e}")
         tiers = granite_explainer.explain(plate_data, raw_satellites)
 
-    # Build Pydantic Models
+    # Construct final payload
     stars = [
         StarAnnotation(
             x=float(s["x"]),
@@ -164,6 +170,8 @@ async def pipeline_streamer(
     ]
 
     response = AnalyzeResponse(
+        source="fallback" if is_fallback else "live",
+        fallback_reason="; ".join(fallback_reasons) if is_fallback else None,
         image_width=plate_data.get("width", 800),
         image_height=plate_data.get("height", 800),
         stars=stars,

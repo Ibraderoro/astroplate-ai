@@ -1,14 +1,14 @@
 """
-IBM Granite multi-tier sky explanation service.
-
-Reads WATSONX_* env vars (already loaded by main.py via load_dotenv).
-Exposes a top-level `explain(plate_data, satellites) -> dict` function
-that returns {"kid": str, "adult": str, "astrophysicist": str}.
+IBM watsonx multi-tier sky explanation service with robust JSON extraction.
 """
+
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import warnings
 from typing import Any, Dict, List
 
 _TIERS = ("kid", "adult", "astrophysicist")
@@ -25,12 +25,33 @@ def _identify_target(ra: float, dec: float) -> str:
     return f"a deep-sky field centered in celestial coordinates (RA {ra:.2f}°, Dec {dec:.2f}°)"
 
 
+def _extract_json_block(text: str) -> dict | None:
+    """Safely isolate and parse a JSON object even when surrounded by markdown or conversational text."""
+    # Look for matching curly braces enclosing JSON
+    match = re.search(r"(\{[\s\S]*\})", text)
+    if not match:
+        return None
+
+    raw_json = match.group(1).strip()
+    try:
+        return json.loads(raw_json)
+    except json.JSONDecodeError:
+        # Fallback: attempt to find the outermost valid { ... } by trimming trailing characters
+        for end_idx in range(len(raw_json), 0, -1):
+            if raw_json[end_idx - 1] == "}":
+                try:
+                    return json.loads(raw_json[:end_idx])
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
 class GraniteExplainer:
     def __init__(self) -> None:
         self.api_key = os.environ.get("WATSONX_API_KEY")
         self.project_id = os.environ.get("WATSONX_PROJECT_ID")
         self.url = os.environ.get("WATSONX_URL", "https://us-south.ml.cloud.ibm.com")
-        self.model_id = os.environ.get("WATSONX_MODEL_ID", "ibm/granite-13b-chat-v2")
+        self.model_id = os.environ.get("WATSONX_MODEL_ID", "ibm/granite-4-h-small")
 
         self.client = None
         self.model = None
@@ -39,16 +60,27 @@ class GraniteExplainer:
             try:
                 from ibm_watsonx_ai import APIClient, Credentials
                 from ibm_watsonx_ai.foundation_models import ModelInference
+                from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams
+                from ibm_watsonx_ai.wml_resource import WatsonxAPIWarning
+
+                warnings.filterwarnings("ignore", category=WatsonxAPIWarning)
 
                 credentials = Credentials(url=self.url, api_key=self.api_key)
                 self.client = APIClient(credentials=credentials, project_id=self.project_id)
-                self.model = ModelInference(model_id=self.model_id, api_client=self.client)
+
+                params = {
+                    GenParams.MAX_NEW_TOKENS: 450,
+                    GenParams.MIN_NEW_TOKENS: 50,
+                    GenParams.REPETITION_PENALTY: 1.05,
+                }
+
+                self.model = ModelInference(
+                    model_id=self.model_id,
+                    api_client=self.client,
+                    params=params,
+                )
             except Exception as e:
                 print(f"[GraniteExplainer Init Error] {e}")
-
-    # ------------------------------------------------------------------
-    # Dynamic Context Builder
-    # ------------------------------------------------------------------
 
     def _build_context(self, plate_data: dict, satellites: list) -> str:
         center_ra = float(plate_data.get("center_ra", 0.0))
@@ -76,10 +108,6 @@ class GraniteExplainer:
             lines.append("No active satellites or orbital debris passes detected in this frame.")
 
         return " ".join(lines)
-
-    # ------------------------------------------------------------------
-    # Dynamic Context-Aware Fallback (Zero-Downtime Demo Mode)
-    # ------------------------------------------------------------------
 
     def _generate_dynamic_fallback(self, plate_data: dict, satellites: list) -> dict[str, str]:
         center_ra = float(plate_data.get("center_ra", 0.0))
@@ -110,48 +138,42 @@ class GraniteExplainer:
             "astrophysicist": f"WCS astrometric calibration centers on {target_name} (α = {center_ra:.4f}°, δ = {center_dec:.4f}°) with resolution {scale:.3f}″/px. {star_count} astrometric reference stars matched.{sat_streak_astro}",
         }
 
-    # ------------------------------------------------------------------
-    # Per-tier Prompt Templates
-    # ------------------------------------------------------------------
-
-    def _tier_prompt(self, tier: str, context: str) -> str:
-        instructions = {
-            "kid": (
-                "You are an enthusiastic astronomy guide for kids. "
-                "In 2 simple, exciting sentences, explain what celestial object and stars are in this picture:"
-            ),
-            "adult": (
-                "You are a science communicator. "
-                "In 2-3 engaging, informative sentences, explain what celestial object was observed, its coordinates, and any satellite passes:"
-            ),
-            "astrophysicist": (
-                "You are a research astrophysicist writing an observational field note. "
-                "In 3 concise technical sentences, report the plate-solved target, coordinates, scale, cataloged stars, and orbital crossings:"
-            ),
-        }
-        return f"{instructions[tier]}\n\nObservation Data:\n{context}\n\nExplanation:"
-
-    # ------------------------------------------------------------------
-    # Public Interface
-    # ------------------------------------------------------------------
+    def _unified_prompt(self, context: str) -> str:
+        return (
+            "You are an astronomical analysis AI. Analyze the observation data and return a single valid JSON object "
+            "with exactly three keys: 'kid', 'adult', and 'astrophysicist'.\n"
+            "- 'kid': 2 simple, exciting sentences explaining what is in the picture for a child.\n"
+            "- 'adult': 2-3 engaging sentences explaining the celestial object, coordinates, and satellites.\n"
+            "- 'astrophysicist': 2-3 technical sentences reporting astrometry, scale, and orbital passes.\n\n"
+            f"Observation Data:\n{context}\n\n"
+            "Output only the raw JSON object without markdown code fences or extra commentary:\n"
+            "{\n  \"kid\": \"...\",\n  \"adult\": \"...\",\n  \"astrophysicist\": \"...\"\n}"
+        )
 
     def explain(self, plate_data: dict, satellites: list) -> dict[str, str]:
         if not self.model:
             return self._generate_dynamic_fallback(plate_data, satellites)
 
         context = self._build_context(plate_data, satellites)
-        result: dict[str, str] = {}
-        for tier in _TIERS:
-            try:
-                prompt = self._tier_prompt(tier, context)
-                generated = self.model.generate_text(prompt=prompt)
-                result[tier] = generated.strip()
-            except Exception as e:
-                print(f"[Granite Generation Error for {tier}] {e}")
-                return self._generate_dynamic_fallback(plate_data, satellites)
-        return result
+        prompt = self._unified_prompt(context)
+
+        try:
+            generated = self.model.generate_text(prompt=prompt)
+            parsed = _extract_json_block(generated)
+            if parsed and all(k in parsed for k in _TIERS):
+                return {k: str(parsed[k]).strip() for k in _TIERS}
+        except Exception as e:
+            print(f"[Granite Explainer Exception] {e}")
+
+        return self._generate_dynamic_fallback(plate_data, satellites)
+
+
+_explainer_instance: GraniteExplainer | None = None
 
 
 def explain(plate_data: dict, satellites: list) -> dict[str, str]:
-    """Instantiate GraniteExplainer and generate multi-tier explanation."""
-    return GraniteExplainer().explain(plate_data, satellites)
+    """Generate multi-tier explanation using shared explainer instance."""
+    global _explainer_instance
+    if _explainer_instance is None:
+        _explainer_instance = GraniteExplainer()
+    return _explainer_instance.explain(plate_data, satellites)

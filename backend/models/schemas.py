@@ -1,11 +1,12 @@
-from pydantic import BaseModel
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
 
 
 class StarAnnotation(BaseModel):
     x: float
     y: float
-    width: float
-    height: float
+    width: float = 24.0
+    height: float = 24.0
     ra: float
     dec: float
 
@@ -25,6 +26,14 @@ class ExplanationTiers(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
+    source: Literal["live", "fallback"] = Field(
+        ...,
+        description="Data provenance: 'live' indicates genuine execution; 'fallback' indicates simulated fallback data.",
+    )
+    fallback_reason: Optional[str] = Field(
+        None,
+        description="Explains why fallback mode was triggered (e.g. Astrometry queue timeout, unconfigured API credentials).",
+    )
     image_width: int
     image_height: int
     stars: list[StarAnnotation]

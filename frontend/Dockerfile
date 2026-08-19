@@ -11,10 +11,14 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 RUN npm run build
 
+# Production runner stage
 FROM node:20-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
+
+# Install sharp directly in runner for standalone image optimization
+RUN npm install sharp
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./

@@ -26,6 +26,8 @@ export interface ExplanationTiers {
 }
 
 export interface AnalyzeResponse {
+  source: 'live' | 'fallback';
+  fallback_reason?: string | null;
   image_width: number;
   image_height: number;
   stars: StarAnnotation[];
