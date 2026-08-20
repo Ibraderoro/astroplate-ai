@@ -28,6 +28,13 @@ CACHE_TTL_SECONDS = 86400  # 24 hours
 EARTH_RADIUS_KM = 6378.137
 FOV_MARGIN_DEG = 0.2  # Margin around plate FOV bounding box
 
+# Circuit breaker: once CelesTrak refuses us (403/blocked), stop retrying it for a
+# cooldown period instead of hammering it on every /analyze call. Per CelesTrak's own
+# usage policy, repeating a request after a 403 does not help and risks a harder,
+# longer-lived IP-level block.
+CIRCUIT_BREAKER_FILE = "/tmp/celestrak_circuit_breaker.txt"
+CIRCUIT_BREAKER_COOLDOWN_SECONDS = 3600  # 1 hour
+
 # Standard browser request headers to prevent WAF bot-filter blocks
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -93,47 +100,107 @@ def _load_cache() -> List[Tuple[str, str, str]] | None:
         return None
 
 
-def fetch_tle_catalog() -> List[Tuple[str, str, str]]:
-    """Retrieve active satellite TLEs: disk cache → JSON API → CDN TLE text → embedded fallback."""
+def _circuit_breaker_tripped() -> bool:
+    """True if CelesTrak recently blocked us and we should skip live calls for a while."""
+    if not os.path.exists(CIRCUIT_BREAKER_FILE):
+        return False
+    return (time.time() - os.path.getmtime(CIRCUIT_BREAKER_FILE)) < CIRCUIT_BREAKER_COOLDOWN_SECONDS
+
+
+def _trip_circuit_breaker() -> None:
+    """Record that CelesTrak just returned 403, so we stop retrying for a cooldown period."""
+    try:
+        with open(CIRCUIT_BREAKER_FILE, "w") as f:
+            f.write(str(time.time()))
+    except Exception as e:
+        print(f"[SatelliteTracker] Could not write circuit breaker file: {e}")
+
+
+def fetch_tle_catalog() -> Tuple[List[Tuple[str, str, str]], str, str | None]:
+    """
+    Retrieve active satellite TLEs: disk cache → JSON API → CDN TLE text → embedded fallback.
+
+    Returns:
+        (catalog, source, reason) where source is one of
+        "cache" | "live_json" | "live_cdn" | "stale_cache" | "embedded_fallback",
+        and reason is a short human-readable explanation (None for the healthy "cache"/"live_*" cases).
+    """
     # 1. Serve from cache if still fresh
     if os.path.exists(CACHE_FILE):
         if (time.time() - os.path.getmtime(CACHE_FILE)) < CACHE_TTL_SECONDS:
             result = _load_cache()
             if result:
-                return result
+                return result, "cache", None
+
+    # 1b. If CelesTrak recently blocked us, don't hammer it again this hour —
+    # go straight to stale cache / embedded fallback instead. Per CelesTrak's own
+    # usage policy, repeating a request after a 403 doesn't help and risks a
+    # harder, longer-lived IP-level block.
+    if _circuit_breaker_tripped():
+        if os.path.exists(CACHE_FILE):
+            result = _load_cache()
+            if result:
+                return (
+                    result,
+                    "stale_cache",
+                    "CelesTrak recently blocked this server; reusing stale cache during cooldown.",
+                )
+        return (
+            _parse_tle_lines(FALLBACK_TLE_DATA.splitlines()),
+            "embedded_fallback",
+            "CelesTrak recently blocked this server; using embedded sample catalog during cooldown.",
+        )
+
+    blocked = False
 
     # 2. Try JSON endpoint with browser headers
     try:
         resp = requests.get(CELESTRAK_JSON_URL, headers=BROWSER_HEADERS, timeout=8)
+        if resp.status_code == 403:
+            blocked = True
         resp.raise_for_status()
         content = resp.text
         catalog = _parse_json_catalog(content)
         if catalog:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 f.write(content)
-            return catalog
+            return catalog, "live_json", None
     except Exception as e:
         print(f"[SatelliteTracker] JSON TLE fetch failed ({e}). Trying CDN fallback.")
 
     # 3. Try CDN raw TLE text
     try:
         resp = requests.get(CELESTRAK_CDN_TLE_URL, headers=BROWSER_HEADERS, timeout=8)
+        if resp.status_code == 403:
+            blocked = True
         resp.raise_for_status()
         content = resp.text
         catalog = _parse_tle_lines(content.splitlines())
         if catalog:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 f.write(content)
-            return catalog
+            return catalog, "live_cdn", None
     except Exception as e:
         print(f"[SatelliteTracker] CDN TLE fetch failed ({e}). Falling back to cached/embedded TLEs.")
+
+    # Both endpoints 403'd — trip the breaker so we stop retrying for a while.
+    if blocked:
+        _trip_circuit_breaker()
 
     # 4. Stale cache, then embedded fallback
     if os.path.exists(CACHE_FILE):
         result = _load_cache()
         if result:
-            return result
-    return _parse_tle_lines(FALLBACK_TLE_DATA.splitlines())
+            return (
+                result,
+                "stale_cache",
+                "CelesTrak unreachable; served TLEs from stale local cache.",
+            )
+    return (
+        _parse_tle_lines(FALLBACK_TLE_DATA.splitlines()),
+        "embedded_fallback",
+        "CelesTrak unreachable (blocked or rate-limited); using a small embedded sample catalog (ISS, HST, 2 Starlink).",
+    )
 
 
 def _parse_tle_lines(raw_lines: Sequence[str]) -> List[Tuple[str, str, str]]:
@@ -262,18 +329,23 @@ def find_satellites(
     wcs_info: Dict[str, Any],
     capture_time_utc: datetime,
     exposure_seconds: float = 15.0,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], str, str | None]:
     """
     Identify and calculate pixel trajectory endpoints for satellites crossing the FOV.
+
+    Returns:
+        (satellites, tle_source, tle_fallback_reason) — tle_source is "cache" | "live_json" |
+        "live_cdn" | "stale_cache" | "embedded_fallback". Only "stale_cache" and
+        "embedded_fallback" represent degraded data; callers should treat those as a fallback.
     """
     if capture_time_utc.tzinfo is None:
         capture_time_utc = capture_time_utc.replace(tzinfo=timezone.utc)
     else:
         capture_time_utc = capture_time_utc.astimezone(timezone.utc)
 
-    catalog = fetch_tle_catalog()
+    catalog, tle_source, tle_reason = fetch_tle_catalog()
     if not catalog:
-        return []
+        return [], tle_source, tle_reason
 
     trail_dt = timedelta(seconds=exposure_seconds / 2.0)
     t_start = capture_time_utc - trail_dt
@@ -323,4 +395,4 @@ def find_satellites(
                 }
             )
 
-    return results
+    return results, tle_source, tle_reason

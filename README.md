@@ -4,6 +4,60 @@
 
 ---
 
+## 🔭 Problem Statement
+
+Raw astrophotography frames are data-rich but largely impenetrable without specialist expertise. An astronomer capturing a long-exposure image faces three compounding challenges: determining *where* in the sky the frame points (astrometric calibration), identifying whether any of the linear streaks crossing the field are satellite trails contaminating the data, and communicating the findings meaningfully to audiences ranging from curious children to peer researchers. Existing tools address each problem in isolation — plate-solvers, orbital-propagation libraries, and large language models exist separately — but no unified, accessible platform synthesises all three into a single, real-time workflow. AstroPlate AI solves this by connecting astrometric plate-solving, live satellite-orbit propagation, and IBM Granite multi-tier AI explanation into one end-to-end pipeline.
+
+---
+
+## 🏆 Selected Challenge Theme
+
+**Space & Astronomy** — addressing the challenge of making astrophotography data accessible and interpretable through AI. AstroPlate AI directly tackles the barrier between raw observational data and human understanding by applying foundation model intelligence to a domain that has historically required years of specialist training to navigate.
+
+---
+
+## 🤖 AI Approach and Architecture
+
+### Model
+AstroPlate AI uses **IBM Granite** (`ibm/granite-13b-chat-v2`) accessed via the `ibm-watsonx-ai` Python SDK and served through [IBM watsonx.ai](https://www.ibm.com/products/watsonx-ai). Granite was selected for its strong instruction-following capability, its provenance transparency, and its fit within the IBM ecosystem that backs the project's deployment infrastructure.
+
+### Context Assembly
+After the plate-solver and satellite tracker complete, the pipeline assembles a structured plain-text context string from the telemetry:
+
+- **WCS field centre** — right ascension and declination in decimal degrees
+- **Plate scale** — arcsec per pixel (sets physical resolution)
+- **Star count** — number of detected point sources in the frame
+- **Satellite passes** — name, NORAD ID, altitude (km), and whether the pass crossed the FOV
+
+This context is injected as the shared factual grounding for all three inference calls.
+
+### Three-Tier Prompt Strategy
+One `generate_text()` call is made per explanation tier, each with a distinct instruction frame:
+
+| Tier | Audience | Instruction framing |
+| ---- | -------- | ------------------- |
+| 🚀 **Kid** | Children / general public | Wonder-filled, simple language, max 3 sentences — no jargon |
+| 🔭 **Adult / Enthusiast** | Science-literate adults | Clear science communication covering constellations, plate scale, and any satellite crossings |
+| ⚛ **Astrophysicist** | Researchers / advanced observers | Rigorous field notes: decimal RA/Dec, plate scale, NORAD IDs, orbital altitudes, 3–5 sentences |
+
+The tier-specific prompt is concatenated with the shared context string and passed directly to `ModelInference.generate_text()`.
+
+### SSE Streaming Architecture
+The `POST /analyze` endpoint returns a `StreamingResponse` (Server-Sent Events). Each pipeline stage emits a `progress` event so the frontend can update its live status stepper in real time:
+
+```
+event: progress  →  { "step": "upload",      "message": "Image received" }
+event: progress  →  { "step": "astrometry",  "message": "Plate-solving…" }
+event: progress  →  { "step": "satellites",  "message": "Propagating orbits…" }
+event: progress  →  { "step": "granite",     "message": "Generating explanations…" }
+event: complete  →  { ...full AnalyzeResponse payload... }
+```
+
+### Fault-Tolerant Fallback
+When watsonx.ai is unreachable (offline demo, rate-limit, or missing credentials), the `GraniteExplainer._generate_dynamic_fallback()` method synthesises contextually accurate explanations from the pipeline telemetry directly — without any LLM call. The UI surfaces a clear `"source": "fallback"` banner so the data provenance is always transparent.
+
+---
+
 ## 🌟 Overview
 
 **AstroPlate AI** is a full-stack astronomical analysis platform designed to turn raw astrophotography frames into rich, contextual celestial data. When an astronomical frame is uploaded:

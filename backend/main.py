@@ -102,9 +102,12 @@ async def pipeline_streamer(
     # Step 3: Satellite Ephemeris Propagation
     yield _format_sse("progress", {"step": "satellites", "message": "Propagating orbital ephemerides..."})
     try:
-        raw_satellites = await loop.run_in_executor(
+        raw_satellites, tle_source, tle_reason = await loop.run_in_executor(
             None, satellite_tracker.find_satellites, plate_data, capture_time_utc
         )
+        if tle_source in ("stale_cache", "embedded_fallback"):
+            is_fallback = True
+            fallback_reasons.append(tle_reason or f"TLE catalog degraded ({tle_source})")
     except Exception as e:
         is_fallback = True
         fallback_reasons.append("SGP4 satellite propagation offline")
